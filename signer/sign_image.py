@@ -9,347 +9,442 @@ from pprint import pprint
 from urllib.parse import quote
 import logging
 import re
+import argparse
 
 
-logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s',stream=sys.stdout,level=logging.INFO)
 
-def send_request(url, method="GET", headers=None, data=None, access_token=None):
+class GCPLogin:
+    def __init__(self):
+        self.access_token=None
+        self.current_user_email=self.retrieve_current_user_email()
+        self.project_id=self.current_user_email.split("@")[1].split(".")[0]
 
-    """
-    Send an HTTP request and return the response.
+        if not self.current_user_email:
+            logging.critical("No user currently logged in. Make sure you have an active user in gcloud")
+            raise Exception("No user found logged in")
 
-    :param url: URL to send the request to
-    :param method: HTTP method (GET or POST)
-    :param headers: Dictionary of headers to send with the request
-    :param data: Data to send with the request. For GET requests, these will be converted to URL parameters; for POST requests, this will be the request body.
-    :return: A dictionary with the status code, response data, and any error message.
-    """
-    try:
-        if not url.startswith("https://"):
-            raise ValueError("URL must start with https:// for security reasons")
-        if not access_token:
-            try:
-                access_token=print_access_token()
-            except Exception as e:
-                return {
-                    "status_code": None,
-                    "data": None,
-                    "error": str(e)
-                }
-        # Ensure headers and data are not None
-        if headers is None:
-            headers = {}
-        if data is None:
-            data = {}
-        headers['Content-Type']="application/json"
-        headers['Authorization']=f"Bearer {access_token}"
-        # Choose the request method
-        if method.upper() == "GET":
-            response = requests.get(url, headers=headers)
-        elif method.upper() == "POST":
-            response = requests.post(url, headers=headers, data=data)
-        else:
-            return {"error": "Unsupported method specified"}
-
-        # Check if the response was successful
-        response.raise_for_status()
-
-        # Return the response status code and content
-        try:
-            response_data = response.json()
-        except ValueError:
-            response_data = response.text
-        return {
-            "status_code": response.status_code,
-            "data": response_data,  # or response.text if expecting text
-            "error": None
-        }
-    except requests.RequestException as e:
-        # Handle any errors that occur during the request
-        return {
-            "status_code": None,
-            "data": None,
-            "error": str(e)
-        }
-
-
-def execute_shell_command(cmd,timeout=5):
-    """
-    Executes a shell command and returns the output.
-
-    Parameters:
-    - cmd (str): The command to execute.
-
-    Returns:
-    - A tuple containing the command's standard output and standard error.
-    """
-    if not isinstance(cmd, str) or ';' in cmd or '&&' in cmd or '||' in cmd:
-        raise ValueError("Invalid command. Command must be a safe string.")
-    try:
-        # Use shlex.split to handle command parsing.
-        process = subprocess.run(shlex.split(cmd), check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,timeout=timeout)
-        stdout = process.stdout
-        return stdout, None  # Return stdout and None for stderr in case of success.
-    except subprocess.CalledProcessError as e:
-        return e.stdout, e.stderr  # Return both stdout and stderr in case of error.
-    except subprocess.TimeoutExpired as e:
-        return e.stdout, e.stderr
-
-def print_access_token():
-    cmd = "gcloud auth print-access-token"
-    stdout, stderr = execute_shell_command(cmd,timeout=2)
-
-    if stderr is None:
-        return stdout.strip()
-    else:
-        raise Exception("Failed to print access token. Please ensure you are properly authenticated and try again.")
-
-def get_current_user_email():
-    url = "https://www.googleapis.com/oauth2/v1/userinfo?alt=json"
-    response = send_request(url=url, method="GET", headers=None, data=None)
-    if response['data'] and  "email" in response['data']:
-        return response['data']['email']
-    return None
-
-def generate_image_description_payload(image_info):
-    payload = {
-        "critical": {
-            "identity": {
-                "docker-reference": image_info['path']
-            },
-            "image": {
-                "docker-manifest-digest": image_info['digest']
-            },
-            "type": "Google cloud binauthz container signature"
-        }
-    }
-    str_payload=json.dumps(payload, indent=0)
-    return str_payload.encode('utf-8')
-
-def generate_attestation_payload(image_info,attestor_info,serialized_payload,payload_signature):
-    payload = {
-    "resourceUri": image_info['fully_qualified_digest'],
-    "note_name": attestor_info['note_reference'],
-    "attestation": {
-        "serialized_payload": serialized_payload,
-        "signatures": [
-            {
-                "public_key_id": attestor_info['key_id'],
-                "signature": payload_signature
-            }]
-        }
-    }
-    str_payload=json.dumps(payload,indent=None)
-    return str_payload.encode('utf-8')
-
-def get_base64_encoded_hash(payload):
-    sha512_hash = hashlib.sha512(payload).digest()
-    base64_encoded_hash = base64.b64encode(sha512_hash).decode('utf-8')
-    return base64_encoded_hash
-
-def generate_image_payload_signature(base64_encoded_hash,key_info,attestor_info):
-
-    # Validate or sanitize key_info values before using them in URL construction
-    for key, value in key_info.items():
-        if not re.match(r'^[\w-]+$', value):
-            raise ValueError(f"Invalid value for {key}: {value}")
-    url =f"https://cloudkms.googleapis.com/v1/projects/{key_info['project_id']}/locations/{key_info['location']}/keyRings/{key_info['keyring']}/cryptoKeys/{key_info['key']}/cryptoKeyVersions/{key_info['version']}:asymmetricSign?alt=json"
-    headers = {
-        "x-goog-user-project": f"{attestor_info['project_id']}"
-    }
-    data=json.dumps({"digest":{"sha512":base64_encoded_hash}})
-    response = send_request(url=url, method="POST", headers=headers, data=data)
-    if response['error'] or not response['data'] or  "signature" not in response['data'] :
+    def get_project_id(self):
+        return self.project_id
+    
+    def get_current_user_email(self):
+        return self.current_user_email
+    
+    def get_access_token(self,force_refresh:bool=False):
+        if force_refresh or not self.access_token:
+            self.access_token=self.retrieve_access_token()
+        return self.access_token
+        
+    def __str__(self):
+        return f"GCPLogin(User: {self.current_user_email})"
+    
+    def retrieve_current_user_email(self):
+        url = "https://www.googleapis.com/oauth2/v1/userinfo?alt=json"
+        response = self.send_request(url=url, method="GET", headers=None, data=None)
+        if response['data'] and  "email" in response['data']:
+            return response['data']['email']
         return None
-    return response['data']['signature']
+    
+    def retrieve_access_token(self):
+        cmd = "gcloud auth print-access-token"
+        stdout, stderr = self.execute_shell_command(cmd,timeout=2)
 
-def retrieve_attestor_info(attestor_info,current_user_email):
-    if not attestor_info['project_id']:
-        #assuming user email project as attestor project id
-        project_id=current_user_email.split("@")[1].split(".")[0]
-        attestor_info['project_id']=project_id
+        if stderr is None:
+            return stdout.strip()
+        else:
+            raise Exception("Failed to print access token. Please ensure you are properly authenticated and try again.")
+    
+    def send_request(self,url:str, method:str="GET", headers:dict=None, data:dict=None):
+        """
+        Send an HTTP request and return the response.
 
-    url =f"https://binaryauthorization.googleapis.com/v1/projects/{attestor_info['project_id']}/attestors/{attestor_info['attestor']}"
-    print(url)
-    headers = {
-        "x-goog-user-project": f"{attestor_info['project_id']}"
-    }
-    response = send_request(url=url, method="GET", headers=headers, data=None)
-    if response['data']:
-        return response['data']
-    return None
-
-
-
-def retrieve_image_info(image_input):
-    image_info={
-        "path":None,
-        "digest":None,
-        "tag":None,
-        "fully_qualified_digest":None
-    }
-
-    pattern = r'^(?P<path>[\w\.\-\/]+)(?::(?P<tag>[\w\.\-]+))?(?:@sha256:(?P<digest>[a-fA-F0-9]{64}))?$'
-    match = re.match(pattern, image_input)
-    if match:
-        image_info.update(match.groupdict())
-
-    if not image_info['digest']:
-        cmd=f"gcloud container images describe {image_info['path']}:{image_info['tag']} --format=json"
-        stdout, stderr = execute_shell_command(cmd=cmd,timeout=2)
+        :param url: URL to send the request to
+        :param method: HTTP method (GET or POST)
+        :param headers: Dictionary of headers to send with the request
+        :param data: Data to send with the request. For GET requests, these will be converted to URL parameters; for POST requests, this will be the request body.
+        :return: A dictionary with the status code, response data, and any error message.
+        """
         try:
-            json_obj=json.loads(stdout.strip())['image_summary']
-            image_info['fully_qualified_digest']=json_obj['fully_qualified_digest']
-            image_info['digest']=json_obj['digest']
-        except:
+            if not url.startswith("https://"):
+                raise ValueError("URL must start with https:// for security reasons")
+            # Ensure headers and data are not None
+            if headers is None:
+                headers = {}
+            if data is None:
+                data = {}
+            headers['Content-Type']="application/json"
+            headers['Authorization']=f"Bearer {self.get_access_token()}"
+            # Choose the request method
+            if method.upper() == "GET":
+                response = requests.get(url, headers=headers)
+            elif method.upper() == "POST":
+                response = requests.post(url, headers=headers, data=data)
+            else:
+                return {"error": "Unsupported method specified"}
+
+            # Check if the response was successful
+            response.raise_for_status()
+
+            # Return the response status code and content
+            try:
+                response_data = response.json()
+            except ValueError:
+                response_data = response.text
+            return {
+                "status_code": response.status_code,
+                "data": response_data,  # or response.text if expecting text
+                "error": None
+            }
+        except requests.RequestException as e:
+            # Handle any errors that occur during the request
+            return {
+                "status_code": None,
+                "data": None,
+                "error": str(e)
+            }
+        
+    def execute_shell_command(self,cmd:str,timeout:int=5):
+        """
+        Executes a shell command and returns the output.
+
+        Parameters:
+        - cmd (str): The command to execute.
+
+        Returns:
+        - A tuple containing the command's standard output and standard error.
+        """
+        if not isinstance(cmd, str) or ';' in cmd or '&&' in cmd or '||' in cmd:
+            raise ValueError("Invalid command. Command must be a safe string.")
+        try:
+            # Use shlex.split to handle command parsing.
+            process = subprocess.run(shlex.split(cmd), check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,timeout=timeout)
+            stdout = process.stdout
+            return stdout, None  # Return stdout and None for stderr in case of success.
+        except subprocess.CalledProcessError as e:
+            return e.stdout, e.stderr  # Return both stdout and stderr in case of error.
+        except subprocess.TimeoutExpired as e:
+            return e.stdout, e.stderr
+
+
+
+class DockerImage:
+    def __init__(self, image_path:str):
+        self.info={
+            "path":None,
+            "digest":None,
+            "tag":None,
+            "fully_qualified_digest":None
+        }
+
+        pattern = r'^(?P<path>[\w\.\-\/]+)(?::(?P<tag>[\w\.\-]+))?(?:@sha256:(?P<digest>[a-fA-F0-9]{64}))?$'
+        match = re.match(pattern, image_path)
+        if match:
+            self.info.update(match.groupdict())
+
+
+    def get_image_description_payload(self) -> bytes:
+        payload = {
+            "critical": {
+                "identity": {
+                    "docker-reference": self.info['path']
+                },
+                "image": {
+                    "docker-manifest-digest": self.info['digest']
+                },
+                "type": "Google cloud binauthz container signature"
+            }
+        }
+        str_payload=json.dumps(payload, indent=0)
+        return str_payload.encode('utf-8')
+    
+    def get_fully_qualified_digest(self)->str:
+        return self.info['fully_qualified_digest']
+    
+
+    def __str__(self):
+        return f"DockerImage: {self.info}"
+
+
+class GoogleArtifactoryImage(DockerImage):
+    def __init__(self, gcp_login:GCPLogin, image_path:str):
+        super().__init__(image_path)
+        self.gcp_login = gcp_login
+        self.retrieve_image_info()
+
+    def __str__(self):
+        return f"GoogleArtifactoryImage: {self.info}"
+    
+    def retrieve_image_info(self):
+        logging.info("Retriving docker image")
+
+        if not self.info['digest']:
+            cmd=f"gcloud container images describe {self.info['path']}:{self.info['tag']} --format=json"
+            stdout, stderr = self.gcp_login.execute_shell_command(cmd=cmd,timeout=2)
+            try:
+                json_obj=json.loads(stdout.strip())['image_summary']
+                self.info['fully_qualified_digest']=json_obj['fully_qualified_digest']
+                self.info['digest']=json_obj['digest']
+            except:
+                logging.critical("It was not possible to get Image digest")
+                raise Exception("It was not possible to get Image digest")
+        else:
+            self.info['fully_qualified_digest']=f"{json_obj['path']}@{json_obj['digest']}"
+    
+    def get_base64_encoded_payload_hash(self)->str:
+        payload=self.get_image_description_payload()
+        sha512_hash = hashlib.sha512(payload).digest()
+        base64_encoded_hash = base64.b64encode(sha512_hash).decode('utf-8')
+        return base64_encoded_hash
+    
+    def get_base64_encoded_payload(self)->str:
+        payload=self.get_image_description_payload()
+        return base64.b64encode(payload).decode('utf-8')
+
+class GoogleKMS:
+    def __init__(self,gcp_login:GCPLogin, key_id:str):
+        self.gcp_login=gcp_login
+        self.info = {
+            "key_id":key_id,
+            "project_id": None,
+            "location": None,
+            "keyring": None,
+            "key": None,
+            "version": None
+        }
+
+        self.retrieve_key_info()
+
+    def get_project_id(self)->str:
+        return self.info["project_id"]
+    
+    def get_key_id(self)->str:
+        return self.info['key_id']
+
+    def retrieve_key_info(self):
+        parts=self.info['key_id'].split("/")
+        self.info["project_id"]=parts[ parts.index('projects') + 1]
+        self.info["location"]=parts[ parts.index('locations') + 1]
+        self.info["keyring"]=parts[ parts.index('keyRings') + 1]
+        self.info["key"]=parts[ parts.index('cryptoKeys') + 1]
+        self.info["version"]=parts[ parts.index('cryptoKeyVersions') + 1]
+        
+        
+    def __str__(self):
+        return f"GoogleKMS: {self.key_info}"
+    
+    def sign_string(self,string:str):
+        url =f"https://cloudkms.googleapis.com/v1/projects/{self.info['project_id']}/locations/{self.info['location']}/keyRings/{self.info['keyring']}/cryptoKeys/{self.info['key']}/cryptoKeyVersions/{self.info['version']}:asymmetricSign?alt=json"
+        headers = {
+            "x-goog-user-project": f"{self.info['project_id']}"
+        }
+        data=json.dumps({"digest":{"sha512":string}})
+        response = self.gcp_login.send_request(url=url, method="POST", headers=headers, data=data)
+        
+        if response['error'] or not response['data'] or  "signature" not in response['data'] :
             return None
-    else:
-        image_info['fully_qualified_digest']=f"{json_obj['path']}@{json_obj['digest']}"
+        return response['data']['signature']
 
 
-    return image_info
 
-def upload_attestation(attestor_info,attestation_payload):
+class GoogleBinaryAuthorizationAttestor:
+    def __init__(self,gcp_login:GCPLogin, name:str, kms_key:GoogleKMS=None, project_id:str=None):
+        self.gcp_login=gcp_login
+        self.kms_key=None
+        self.info = {
+            "project_id": project_id,
+            "name": name,
+            "note_reference": None,
+            "note_id": None
+        }
 
-    url =f"https://containeranalysis.googleapis.com/v1/projects/{attestor_info['project_id']}/occurrences/"
-    headers = {
-        "x-goog-user-project": f"{attestor_info['project_id']}"
+        if not project_id:
+            self.info['project_id']=gcp_login.get_project_id()
+        
+        attestor_retrieved_info=self.retrieve_attestor_info()
+        if not kms_key:
+            key_id=attestor_retrieved_info['userOwnedGrafeasNote']['publicKeys'][0]['id']
+            self.kms_key=GoogleKMS(gcp_login=gcp_login,key_id=key_id)
+
+        self.info['note_reference']=attestor_retrieved_info['userOwnedGrafeasNote']['noteReference']
+        self.info['note_id']=self.info['note_reference'].split("/")[-1]
+
+    def get_kms_key(self)->str:
+        return self.kms_key
+
+    def get_project_id(self)->str:
+        return self.info["project_id"]
+
+    def __str__(self):
+        return f"GoogleBinaryAuthorizationAttestor: {self.key_info} {self.attestor_info}"
+    
+    def retrieve_attestor_info(self):
+        logging.info("Retriving attestor informations")
+        attestor_name=self.info['name']
+        project_id=self.info['project_id']
+        url =f"https://binaryauthorization.googleapis.com/v1/projects/{project_id}/attestors/{attestor_name}"
+        headers = {
+            "x-goog-user-project": f"{project_id}"
+        }
+        response = self.gcp_login.send_request(url=url, method="GET", headers=headers, data=None)
+        if response['data']:
+            return response['data']
+        else:
+            raise Exception("It was not possible to retireve attestor informations")
+    
+    def generate_attestation_payload(self,fully_qualified_digest:str,serialized_payload:str,payload_signature:str)->bytes:
+        payload = {
+        "resourceUri": fully_qualified_digest,
+        "note_name": self.info['note_reference'],
+        "attestation": {
+            "serialized_payload": serialized_payload,
+            "signatures": [
+                {
+                    "public_key_id": self.kms_key.get_key_id(),
+                    "signature": payload_signature
+                }]
+            }
+        }
+        str_payload=json.dumps(payload,indent=None)
+        return str_payload.encode('utf-8')
+    
+    def upload_attestation(self,fully_qualified_digest:str,serialized_payload:str,payload_signature:str):
+        attestation_payload=self.generate_attestation_payload(fully_qualified_digest,serialized_payload,payload_signature)
+        url =f"https://containeranalysis.googleapis.com/v1/projects/{self.info['project_id']}/occurrences/"
+        headers = {
+            "x-goog-user-project": f"{self.info['project_id']}"
+        }
+        data=attestation_payload
+        response = self.gcp_login.send_request(url=url, method="POST", headers=headers, data=data)
+        if response['data']:
+            return response['data']
+        elif response['error'] and "Conflict for url" in response['error']:
+            logging.critical("Attestation not uploaded: Conflict for the attestation url, are you trying to upload the same attestation twice?")
+        return None
+    
+    def get_image_attestation(self,fully_qualified_digest)->dict:
+        attestor_name=self.info["name"]
+        attestor_project_id=self.info["project_id"]
+        cmd = f"gcloud container binauthz attestations list --artifact-url=\"{fully_qualified_digest}\" --attestor=\"{attestor_name}\" --attestor-project=\"{attestor_project_id}\" --format=json"
+        stdout, stderr = self.gcp_login.execute_shell_command(cmd,timeout=2)
+
+        if stderr is None:
+            result=stdout.strip()
+            result_json=None
+            try:
+                result_json=json.loads(result)
+                signatures=[]
+                for attestation_obj in result_json:
+                    attestation=attestation_obj["attestation"]["signatures"]
+                    for signature in attestation:
+                        signatures.append(signature)
+                if len(signatures)>0:
+                    logging.info(f"Image: {fully_qualified_digest}")
+                    for signature in signatures:
+                        logging.info(f"signed by publicKeyId: {signature['publicKeyId']}")
+                        logging.info(f"with signature: {signature['signature']}")
+                return signatures
+
+            except:
+                logging.info(f"Image not signed:{fully_qualified_digest}")
+        else:
+            logging.debug(f"Error: {stderr}")
+            logging.critical(f"Failed to verify image {fully_qualified_digest}")
+
+        return None
+
+def get_command_line_args():
+    parser = argparse.ArgumentParser(description='Process command line arguments.')
+
+    # Define the expected command-line arguments
+    parser.add_argument('--image_path', type=str, help='us-docker.pkg.dev/<projectid>/<repositoryname>/[image_name@sha256<image_digest> or image_name:<image_tag>]', required=True)
+    parser.add_argument('--attestor_project_name', type=str, default=None, help='<projectid>')
+    parser.add_argument('--attestor_name', type=str, default='tag-attestor', help='<tag-attestor-name>')
+    parser.add_argument('--attestor_key_id', type=str, default=None, help='//cloudkms.googleapis.com/v1/projects/<projectid>/locations/<location>/keyRings/<keyring>/cryptoKeys/<key>/cryptoKeyVersions/1')
+    parser.add_argument('--signer_logging_level', type=str, default='INFO', choices=['CRITICAL', 'FATAL', 'ERROR', 'WARNING', 'INFO', 'DEBUG'], help='CRITICAL|FATAL|ERROR|WARNING|INFO|DEBUG')
+    parser.add_argument('--command', type=str, default='sign', choices=['sign', 'verify'], help='sign|verify')
+    
+    args = parser.parse_args()
+
+    # Convert argparse Namespace to a dictionary
+    args_dict = {
+        "IMAGE_PATH": {"required": True, "value": args.image_path},
+        "ATTESTOR_PROJECT_NAME": {"required": False, "value": args.attestor_project_name},
+        "ATTESTOR_NAME": {"required": False, "value": args.attestor_name},
+        "ATTESTOR_KEY_ID": {"required": False, "value": args.attestor_key_id},
+        "SIGNER_LOGGING_LEVEL": {"required": False, "value": args.signer_logging_level},
+        "COMMAND": {"required": True, "value": args.command}
     }
-    data=attestation_payload
-    response = send_request(url=url, method="POST", headers=headers, data=data)
-    if response['data']:
-        return response['data']
-    elif response['error'] and "Conflict for url" in response['error']:
-        logging.critical("Attestation not uploaded: Conflict for the attestation url, are you trying to upload the same attestation twice?")
-    return None
 
-def get_env():
-    env_variables = {
-        "IMAGE_PATH": {"default":None,"info":"us-docker.pkg.dev/<projectid>/<repositoryname>/[image_name@sha256<image_digest> or image_name:<image_tag>]","required":True,"value":None},
-        "ATTESTOR_PROJECT_NAME": {"default":None,"info":"<projectid>","required":False,"value":None},
-        "ATTESTOR_NAME": {"default":"tag-attestor","info":"<tag-attestor-name>","required":False,"value":None},
-        "ATTESTOR_KEY_ID": {"default":None,"info":"'//cloudkms.googleapis.com/v1/projects/<projectid>/locations/<location>/keyRings/<keyring>/cryptoKeys/<key>/cryptoKeyVersions/1","required":False,"value":None},
-        "SIGNER_LOGGING_LEVEL": {"default":"INFO","info":"CRITICAL|FATAL|ERROR|WARNING|INFO|DEBUG","required":False,"value":None}
-    }
-
-    config = {}
-
-    # Read environment variables and populate the config dictionary
-    for var_name, env_var in env_variables.items():
-        env_var['value']=os.environ.get(var_name)
-        if env_var['required'] and not env_var['value']:
-            logging.critical(f"Error: The following environment variables are missing: {var_name}. A value in the format of {env_var['info']} should be provided")
+    # Validate required arguments and set defaults
+    for var_name, arg in args_dict.items():
+        if arg['required'] and not arg['value']:
+            logging.critical(f"Error: The following command-line arguments are missing: {var_name}. A value in the format of {arg['info']} should be provided")
             sys.exit(1)
-        if not env_var['required'] and not env_var['value']:
-            logging.info(f"{var_name} has not being set, a default value will be assumed in the format {env_var['info']}")
-            env_var['value']=env_var['default']
 
-    return env_variables
-
-def get_key_info(attestor_info):
-    #this assumes attestors has only one key id to use. In case of multiple keyid for the same attestor we need to choose the correct one.
-    key_id=attestor_info['key_id']
-    parts=key_id.split("/")
-    projects_index = parts.index('projects') + 1
-    locations_index = parts.index('locations') + 1
-    keyRings_index = parts.index('keyRings') + 1
-    cryptoKeys_index = parts.index('cryptoKeys') + 1
-    cryptoKeyVersions_index = parts.index('cryptoKeyVersions') + 1
-
-    key_info={
-        "project_id":parts[ parts.index('projects') + 1],
-        "location": parts[ parts.index('locations') + 1],
-        "keyring":parts[ parts.index('keyRings') + 1],
-        "key":parts[ parts.index('cryptoKeys') + 1],
-        "version":parts[ parts.index('cryptoKeyVersions') + 1]
-    }
-
-    return key_info
+    return args_dict
 
 
 
-def main():
-    env_variables=get_env()
-
-    # Configure the logging system
-    level=logging.INFO
-    if env_variables['SIGNER_LOGGING_LEVEL'] == "CRITICAL":
-        level = logging.CRITICAL
-    elif env_variables['SIGNER_LOGGING_LEVEL'] == "ERROR":
-        level = logging.ERROR
-    elif env_variables['SIGNER_LOGGING_LEVEL'] == "WARNING":
-        level = logging.WARNING
-    elif env_variables['SIGNER_LOGGING_LEVEL'] == "INFO":
-        level = logging.INFO
-    elif env_variables['SIGNER_LOGGING_LEVEL'] == "DEBUG":
-        level = logging.DEBUG
-
-    logging.root.setLevel(level)
-
-
-    #generate_payload_file
-
-    key_info = None
-
-    attestor_info={
-        "project_id":env_variables['ATTESTOR_PROJECT_NAME']['value'],
-        "attestor": env_variables['ATTESTOR_NAME']['value'],
-        "key_id":None,
-        "note_reference":None,
-        "note_id":None
-    }
-    #------ Initial check ----------------------#
-    current_user_email=get_current_user_email()
-    if not current_user_email:
-        logging.critical("No user currently logged in. Make sure you have an active user in gcloud")
-        return
-    logging.debug(f"Acting as {current_user_email}")
-
-    #------ Retrieve initial image info ----------------------#
-    logging.info("Retriving docker image")
-    image_info=retrieve_image_info(env_variables['IMAGE_PATH']['value'])
-    if not image_info:
-        logging.critical("it was not possible to retrive image digest. Please make sure to set the image digest or the image tag in the parameters")
-        return
-
-
-    #------ Retrieve initial attestor key info ----------------------#
-    logging.info("Retriving attestor informations")
-    attestor_retrieved_info=retrieve_attestor_info(attestor_info=attestor_info,current_user_email=current_user_email)
-    if not attestor_retrieved_info:
-        logging.critical(f"attestor {attestor_info} not present")
-        return
-    if env_variables['ATTESTOR_KEY_ID']['value']:
-        logging.info("Using user defined attetor key")
-        attestor_info['key_id']=env_variables['ATTESTOR_KEY_ID']['value']
-    else:
-       logging.warning("Using first attestor key id found in attestor key")
-       attestor_info['key_id']=attestor_retrieved_info['userOwnedGrafeasNote']['publicKeys'][0]['id']
-    attestor_info['note_reference']=attestor_retrieved_info['userOwnedGrafeasNote']['noteReference']
-    attestor_info['note_id']=attestor_info['note_reference'].split("/")[-1]
-
-    key_info=get_key_info(attestor_info=attestor_info)
-
+def sign_image(gcp_artifactory_image:GoogleArtifactoryImage,kms_key:GoogleKMS,gcp_attestor:GoogleBinaryAuthorizationAttestor):
+    logging.info("Image signing ...")
     #------ Genereting payload ----------------------#
-    logging.info("Generating json docker_image_descriptiion with image url@sha256-digest")
-    image_description_payload=generate_image_description_payload(image_info)
     logging.info("Generating docker_image_description in base64 of the docker_image_description_sha256")
-    image_description_payload_sha256=get_base64_encoded_hash(image_description_payload)
+    image_info=gcp_artifactory_image.get_base64_encoded_payload()
+    image_info_sha256=gcp_artifactory_image.get_base64_encoded_payload_hash()
+    
     #------ generate payload signature----------------------#
     logging.info("Calling google kms to sign image_description_payload sha256")
-    image_payload_signature=generate_image_payload_signature(image_description_payload_sha256,key_info,attestor_info)
-    if not image_payload_signature:
-        return
-
-    serialized_payload=base64.b64encode(image_description_payload).decode('utf-8')
-
+    image_info_sha256_signature=kms_key.sign_string(image_info_sha256)
+    
     #------ Generate image attestation ----------------------#
     logging.info("Generate attestation to upload")
-    attestation_payload=generate_attestation_payload(image_info=image_info,attestor_info=attestor_info,serialized_payload=serialized_payload,payload_signature=image_payload_signature)
-    logging.info("Upload attestation")
-    uploaded_attestation=upload_attestation(attestor_info=attestor_info,attestation_payload=attestation_payload)
+    attestation_payload=gcp_attestor.upload_attestation(fully_qualified_digest=gcp_artifactory_image.get_fully_qualified_digest(),serialized_payload=image_info,payload_signature=image_info_sha256_signature)
     logging.info("Process completed")
 
+def verify_image(gcp_artifactory_image:GoogleArtifactoryImage,gcp_attestor:GoogleBinaryAuthorizationAttestor):
+    logging.info("Image verification ...")
+    fully_qualified_digest=gcp_artifactory_image.get_fully_qualified_digest()
+    gcp_attestor.get_image_attestation(fully_qualified_digest)
+    
+def set_logging_level(logging_level):
+    logging_level_options={
+        "CRITICAL":logging.CRITICAL,
+        "ERROR":logging.ERROR,
+        "WARNING":logging.WARNING,
+        "INFO":logging.INFO,
+        "DEBUG":logging.DEBUG
+    }
+    logging.root.setLevel(logging_level_options[logging_level])
+
+def main():
+    #------ Extract arguments/setup variables ----------------------#
+    env_variables=get_command_line_args()
+    logging_level=env_variables['SIGNER_LOGGING_LEVEL']['value']
+    attestor_project_id=env_variables['ATTESTOR_PROJECT_NAME']['value']
+    attestor_name=env_variables['ATTESTOR_NAME']['value']
+    image_path=env_variables['IMAGE_PATH']['value']
+    attestor_key_id=env_variables['ATTESTOR_KEY_ID']['value']
+    current_user_email=None
+
+
+    set_logging_level(logging_level)
+
+    gcp_login=GCPLogin()
+    gcp_artifactory_image=GoogleArtifactoryImage(gcp_login=gcp_login,image_path=image_path)
+    if attestor_key_id:
+        kms_key=GoogleKMS(gcp_login=gcp_login,key_id=attestor_key_id)
+    else:
+        kms_key=None
+    gcp_attestor=GoogleBinaryAuthorizationAttestor(gcp_login,name=attestor_name,project_id=attestor_project_id,kms_key=kms_key)
+    kms_key=gcp_attestor.get_kms_key()
+
+    if env_variables["COMMAND"]["value"] == "sign":
+        sign_image(gcp_artifactory_image=gcp_artifactory_image,kms_key=kms_key,gcp_attestor=gcp_attestor)
+    elif env_variables["COMMAND"]["value"] == "verify":
+        verify_image(gcp_artifactory_image=gcp_artifactory_image,gcp_attestor=gcp_attestor)
+    else:
+        logging.critical(f"command {env_variables["COMMAND"]} not found")
+
 if __name__ == "__main__":
+    logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s',stream=sys.stdout,level=logging.INFO)
     main()
 
