@@ -269,7 +269,7 @@ class GoogleKMS:
         
         
     def __str__(self):
-        return f"GoogleKMS: {self.key_info}"
+        return f"GoogleKMS: {self.info}"
     
     def sign_string(self,string:str):
         url =f"https://cloudkms.googleapis.com/v1/projects/{self.info['project_id']}/locations/{self.info['location']}/keyRings/{self.info['keyring']}/cryptoKeys/{self.info['key']}/cryptoKeyVersions/{self.info['version']}:asymmetricSign?alt=json"
@@ -288,7 +288,7 @@ class GoogleKMS:
 class GoogleBinaryAuthorizationAttestor:
     def __init__(self,gcp_login:GCPLogin, name:str, kms_key:GoogleKMS=None, project_id:str=None):
         self.gcp_login=gcp_login
-        self.kms_key=None
+        self.kms_key=kms_key
         self.info = {
             "project_id": project_id,
             "name": name,
@@ -328,7 +328,7 @@ class GoogleBinaryAuthorizationAttestor:
         if response['data']:
             return response['data']
         else:
-            raise Exception("It was not possible to retireve attestor informations")
+            raise Exception("It was not possible to retrieve attestor informations")
     
     def generate_attestation_payload(self,fully_qualified_digest:str,serialized_payload:str,payload_signature:str)->bytes:
         payload = {
@@ -426,7 +426,6 @@ def sign_image(gcp_login:GCPLogin,image_path:str,attestor_name:str,attestor_proj
     
     gcp_attestor=GoogleBinaryAuthorizationAttestor(gcp_login,name=attestor_name,project_id=attestor_project_id,kms_key=kms_key)
     kms_key=gcp_attestor.get_kms_key()
-
 
     logging.info("Image signing ...")
     #------ Genereting payload ----------------------#
