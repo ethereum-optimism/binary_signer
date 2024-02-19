@@ -127,8 +127,10 @@ class GCPLogin:
 
 
 class DockerImage:
-    def __init__(self, image_path:str):
+    def __init__(self, gcp_login:GCPLogin,image_path:str):
+        self.gcp_login = gcp_login
         self.info={
+            "name":None,
             "path":None,
             "digest":None,
             "tag":None,
@@ -139,7 +141,11 @@ class DockerImage:
         match = re.match(pattern, image_path)
         if match:
             self.info.update(match.groupdict())
-
+        if "/" in self.info['path']:
+            self.info['name']=self.info['path'].split("/")[-1]
+        else:
+            self.info['name']=self.info['path']
+        
 
     def get_image_description_payload(self) -> bytes:
         payload = {
@@ -162,12 +168,46 @@ class DockerImage:
 
     def __str__(self):
         return f"DockerImage: {self.info}"
+    
+    def get_image_name(self)->str:
+        return self.info['name']
 
+    def get_image_tag(self)->str:
+        return self.info['tag']
+    
+    def pull(self,force_refresh=False,platform="amd64")->str:
+        source_image_path=f"{self.info['path']}:{self.info['tag']}"
+        # if not force_refresh:
+        #     stdout, stderr =self.gcp_login.execute_shell_command(f"docker image inspect {source_image_path} --platform {platform}",timeout=60)
+        #     if (stdout):
+        #         logging.info(f"Image already exists locally {source_image_path}")
+        #         return True
+
+        logging.info(f"Pulling image {source_image_path}")
+        stdout, stderr =self.gcp_login.execute_shell_command(f"docker pull {source_image_path} --platform {platform}",timeout=60)
+        if (stderr):
+            logging.critical(f"FAIL: Pulling image {source_image_path} {stderr}")
+            return False
+    
+        return True
+
+    def push(self,destination_image_path,force_refresh=False)->str:
+        source_image_path=f"{self.info['path']}:{self.info['tag']}"
+        logging.info(f"Tagging image {source_image_path} to {destination_image_path}")
+        stdout, stderr = self.gcp_login.execute_shell_command(f"docker tag {source_image_path} {destination_image_path}",timeout=60)
+        if (stderr):
+            logging.critical(f"FAIL:Tagging image {source_image_path} to {destination_image_path} {stderr}")
+            return None
+        
+        logging.info(f"Push image {destination_image_path}")
+        stdout, stderr = self.gcp_login.execute_shell_command(f"docker push {destination_image_path}",timeout=60)
+        if (stderr):
+            logging.critical(f"FAIL:Push image {destination_image_path} {stderr}")
+            return None
 
 class GoogleArtifactoryImage(DockerImage):
     def __init__(self, gcp_login:GCPLogin, image_path:str):
-        super().__init__(image_path)
-        self.gcp_login = gcp_login
+        super().__init__(gcp_login,image_path)
         self.retrieve_image_info()
 
     def __str__(self):
@@ -317,7 +357,7 @@ class GoogleBinaryAuthorizationAttestor:
         if response['data']:
             return response['data']
         elif response['error'] and "Conflict for url" in response['error']:
-            logging.critical("Attestation not uploaded: Conflict for the attestation url, are you trying to upload the same attestation twice?")
+            logging.warning("Attestation not uploaded: Conflict for the attestation url, are you trying to upload the same attestation twice?")
         return None
     
     def get_image_attestation(self,fully_qualified_digest)->dict:
@@ -355,36 +395,39 @@ def get_command_line_args():
     parser = argparse.ArgumentParser(description='Process command line arguments.')
 
     # Define the expected command-line arguments
-    parser.add_argument('--image_path', type=str, help='us-docker.pkg.dev/<projectid>/<repositoryname>/[image_name@sha256<image_digest> or image_name:<image_tag>]', required=True)
-    parser.add_argument('--attestor_project_name', type=str, default=None, help='<projectid>')
-    parser.add_argument('--attestor_name', type=str, default='tag-attestor', help='<tag-attestor-name>')
-    parser.add_argument('--attestor_key_id', type=str, default=None, help='//cloudkms.googleapis.com/v1/projects/<projectid>/locations/<location>/keyRings/<keyring>/cryptoKeys/<key>/cryptoKeyVersions/1')
-    parser.add_argument('--signer_logging_level', type=str, default='INFO', choices=['CRITICAL', 'FATAL', 'ERROR', 'WARNING', 'INFO', 'DEBUG'], help='CRITICAL|FATAL|ERROR|WARNING|INFO|DEBUG')
-    parser.add_argument('--command', type=str, default='sign', choices=['sign', 'verify'], help='sign|verify')
+    parser.add_argument('--image-path', type=str, help='us-docker.pkg.dev/<projectid>/<repositoryname>/[image_name@sha256<image_digest> or image_name:<image_tag>]')
+    parser.add_argument('--source-image-path', type=str, help='<docker_repository>/[image_name@sha256<image_digest> or image_name:<image_tag>]')
+    parser.add_argument('--destination-artifact-repository', type=str, help='us-docker.pkg.dev/<projectid>/<repositoryname>')
+    parser.add_argument('--attestor-project-name', type=str, default=None, help='<projectid>')
+    parser.add_argument('--attestor-name', type=str, default='tag-attestor', help='<tag-attestor-name>')
+    parser.add_argument('--attestor-key-id', type=str, default=None, help='//cloudkms.googleapis.com/v1/projects/<projectid>/locations/<location>/keyRings/<keyring>/cryptoKeys/<key>/cryptoKeyVersions/1')
+    parser.add_argument('--signer-logging-level', type=str, default='INFO', choices=['CRITICAL', 'FATAL', 'ERROR', 'WARNING', 'INFO', 'DEBUG'], help='CRITICAL|FATAL|ERROR|WARNING|INFO|DEBUG')
+    parser.add_argument('--command', type=str, default='sign', choices=['sign', 'verify', 'transfer', 'transfer-and-sign'], help='sign|verify|transfer|transfer-and-sign')
+    parser.add_argument('--platform', type=str, default='linux/amd64', help='platform used for pulling images')
     
     args = parser.parse_args()
 
-    # Convert argparse Namespace to a dictionary
-    args_dict = {
-        "IMAGE_PATH": {"required": True, "value": args.image_path},
-        "ATTESTOR_PROJECT_NAME": {"required": False, "value": args.attestor_project_name},
-        "ATTESTOR_NAME": {"required": False, "value": args.attestor_name},
-        "ATTESTOR_KEY_ID": {"required": False, "value": args.attestor_key_id},
-        "SIGNER_LOGGING_LEVEL": {"required": False, "value": args.signer_logging_level},
-        "COMMAND": {"required": True, "value": args.command}
-    }
-
-    # Validate required arguments and set defaults
-    for var_name, arg in args_dict.items():
-        if arg['required'] and not arg['value']:
-            logging.critical(f"Error: The following command-line arguments are missing: {var_name}. A value in the format of {arg['info']} should be provided")
-            sys.exit(1)
-
-    return args_dict
+    return args
 
 
 
-def sign_image(gcp_artifactory_image:GoogleArtifactoryImage,kms_key:GoogleKMS,gcp_attestor:GoogleBinaryAuthorizationAttestor):
+def sign_image(gcp_login:GCPLogin,image_path:str,attestor_name:str,attestor_project_id:str,attestor_key_id:str=None):
+    
+    try:
+        gcp_artifactory_image=GoogleArtifactoryImage(gcp_login=gcp_login,image_path=image_path)
+    except:
+        logging.critical("Image {image_path} not present remotely")
+        return None
+
+    if attestor_key_id:
+        kms_key=GoogleKMS(gcp_login=gcp_login,key_id=attestor_key_id)
+    else:
+        kms_key=None
+    
+    gcp_attestor=GoogleBinaryAuthorizationAttestor(gcp_login,name=attestor_name,project_id=attestor_project_id,kms_key=kms_key)
+    kms_key=gcp_attestor.get_kms_key()
+
+
     logging.info("Image signing ...")
     #------ Genereting payload ----------------------#
     logging.info("Generating docker_image_description in base64 of the docker_image_description_sha256")
@@ -399,12 +442,35 @@ def sign_image(gcp_artifactory_image:GoogleArtifactoryImage,kms_key:GoogleKMS,gc
     logging.info("Generate attestation to upload")
     attestation_payload=gcp_attestor.upload_attestation(fully_qualified_digest=gcp_artifactory_image.get_fully_qualified_digest(),serialized_payload=image_info,payload_signature=image_info_sha256_signature)
     logging.info("Process completed")
+    return attestation_payload
 
-def verify_image(gcp_artifactory_image:GoogleArtifactoryImage,gcp_attestor:GoogleBinaryAuthorizationAttestor):
+def verify_image(gcp_login:GCPLogin,image_path:str,attestor_name:str,attestor_project_id:str):
+    
+    gcp_artifactory_image=GoogleArtifactoryImage(gcp_login=gcp_login,image_path=image_path)
+    gcp_attestor=GoogleBinaryAuthorizationAttestor(gcp_login,name=attestor_name,project_id=attestor_project_id)
+    kms_key=gcp_attestor.get_kms_key()
+
+
     logging.info("Image verification ...")
     fully_qualified_digest=gcp_artifactory_image.get_fully_qualified_digest()
     gcp_attestor.get_image_attestation(fully_qualified_digest)
+
+def transfer(gcp_login:GCPLogin,source_image_path:str,destination_artifact_repository:str)->str:
+    docker_image=DockerImage(gcp_login=gcp_login,image_path=source_image_path)
+    destination_image_path=f"{destination_artifact_repository}/{docker_image.get_image_name()}:{docker_image.get_image_tag()}"
+    docker_image.pull()
+
+    try:
+        #if raise exception, image does not exists remotely
+        GoogleArtifactoryImage(gcp_login=gcp_login,image_path=destination_image_path)
+    except:
+        pass
+        #in his case image does not exists yet remotely
+        docker_image.push(destination_image_path)
     
+    return destination_image_path   
+
+
 def set_logging_level(logging_level):
     logging_level_options={
         "CRITICAL":logging.CRITICAL,
@@ -418,29 +484,38 @@ def set_logging_level(logging_level):
 def main():
     #------ Extract arguments/setup variables ----------------------#
     env_variables=get_command_line_args()
-    logging_level=env_variables['SIGNER_LOGGING_LEVEL']['value']
-    attestor_project_id=env_variables['ATTESTOR_PROJECT_NAME']['value']
-    attestor_name=env_variables['ATTESTOR_NAME']['value']
-    image_path=env_variables['IMAGE_PATH']['value']
-    attestor_key_id=env_variables['ATTESTOR_KEY_ID']['value']
+    
+    logging_level=env_variables.signer_logging_level
+    attestor_project_id=env_variables.attestor_project_name
+    attestor_name=env_variables.attestor_name
+    image_path=env_variables.image_path
+    attestor_key_id=env_variables.attestor_key_id
+    source_image_path=env_variables.source_image_path
+    command=env_variables.command
+    destination_artifact_repository=env_variables.destination_artifact_repository
     current_user_email=None
-
 
     set_logging_level(logging_level)
 
     gcp_login=GCPLogin()
-    gcp_artifactory_image=GoogleArtifactoryImage(gcp_login=gcp_login,image_path=image_path)
-    if attestor_key_id:
-        kms_key=GoogleKMS(gcp_login=gcp_login,key_id=attestor_key_id)
-    else:
-        kms_key=None
-    gcp_attestor=GoogleBinaryAuthorizationAttestor(gcp_login,name=attestor_name,project_id=attestor_project_id,kms_key=kms_key)
-    kms_key=gcp_attestor.get_kms_key()
 
-    if env_variables["COMMAND"]["value"] == "sign":
-        sign_image(gcp_artifactory_image=gcp_artifactory_image,kms_key=kms_key,gcp_attestor=gcp_attestor)
-    elif env_variables["COMMAND"]["value"] == "verify":
-        verify_image(gcp_artifactory_image=gcp_artifactory_image,gcp_attestor=gcp_attestor)
+    if command == "sign":
+        sign_image(gcp_login=gcp_login,image_path=image_path,attestor_name=attestor_name,attestor_project_id=attestor_project_id,attestor_key_id=attestor_key_id)
+    elif command == "verify":
+        verify_image(gcp_login=gcp_login,image_path=image_path,attestor_name=attestor_name,attestor_project_id=attestor_project_id)
+    elif command == "transfer":
+        image_path=transfer(gcp_login=gcp_login,source_image_path=source_image_path,destination_artifact_repository=destination_artifact_repository)
+        if not image_path:
+            logging.critical(f"It was not possible to transfer {source_image_path} to {destination_artifact_repository}")      
+    elif command == "transfer-and-sign":
+        image_path=transfer(gcp_login=gcp_login,source_image_path=source_image_path,destination_artifact_repository=destination_artifact_repository)
+        if not image_path:
+            logging.critical(f"It was not possible to transfer {source_image_path} to {destination_artifact_repository}")
+            return
+        attestation_payload=sign_image(gcp_login=gcp_login,image_path=image_path,attestor_name=attestor_name,attestor_project_id=attestor_project_id,attestor_key_id=attestor_key_id)
+        if not attestation_payload:
+            return
+        verify_image(gcp_login=gcp_login,image_path=image_path,attestor_name=attestor_name,attestor_project_id=attestor_project_id)
     else:
         logging.critical(f"command {env_variables["COMMAND"]} not found")
 

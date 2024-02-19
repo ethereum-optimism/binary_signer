@@ -30,18 +30,60 @@ pip install -r requirements.txt
 ```
 
 ## Usage
-Setting Environment Variables
-The script expects certain environment variables to be set for its operation. These include:
-
-- IMAGE_PATH: The path to the image in the registry.
-- IMAGE_DIGEST: The digest of the image.
-- ATTESTOR_PROJECT_NAME: The name of the project where the attestor is located.
-- ATTESTOR_NAME: The name of the attestor.
-- ATTESTOR_KEY_ID: The ID of the key used by the attestor (optional).
-
-Before running the script, ensure you have configured your Google Cloud SDK and have the necessary permissions set up. The script can be executed as follows:
 
 ```bash
 cd signer
-python sign_image.py
+
+python sign_image.py [--image-path IMAGE_PATH] [--source-image-path SOURCE_IMAGE_PATH]
+[--destination-artifact-repository DESTINATION_ARTIFACT_REPOSITORY]
+[--attestor-project-name ATTESTOR_PROJECT_NAME] [--attestor-name ATTESTOR_NAME]
+[--attestor-key-id ATTESTOR_KEY_ID] [--signer-logging-level LOGGING_LEVEL] [--command COMMAND]
+[--platform PLATFORM]
+
 ```
+
+### Options
+
+- `--image-path`: Path to the Docker image to be signed.
+- `--source-image-path`: Source image path for transfer and sign commands.
+- `--destination-artifact-repository`: Destination repository for transferring images.
+- `--attestor-project-name`: Project ID of the attestor.
+- `--attestor-name`: Name of the attestor.
+- `--attestor-key-id`: Key ID for the attestor.
+- `--signer-logging-level`: Logging level (`CRITICAL`, `FATAL`, `ERROR`, `WARNING`, `INFO`, `DEBUG`).
+- `--command`: Command to execute (`sign`, `verify`, `transfer`, `transfer-and-sign`).
+- `--platform`: Platform used for pulling images.
+
+## Classes
+
+### GCPLogin
+
+- Handles Google Cloud Platform login and access token retrieval.
+
+### DockerImage
+
+- Represents a Docker image and provides methods for pulling and pushing images.
+
+### GoogleArtifactoryImage
+
+- Subclass of `DockerImage` specialized for Google Artifactory images.
+
+### GoogleKMS
+
+- Manages Google Key Management Service (KMS) operations.
+
+### GoogleBinaryAuthorizationAttestor
+
+- Manages attestor operations for binary authorization.
+
+## Functions
+
+- `get_command_line_args()`: Parses command line arguments.
+- `sign_image(gcp_login, image_path, attestor_name, attestor_project_id, attestor_key_id)`: Signs a Docker image.
+- `verify_image(gcp_login, image_path, attestor_name, attestor_project_id)`: Verifies the signature of a Docker image.
+- `transfer(gcp_login, source_image_path, destination_artifact_repository)`: Transfers a Docker image to a destination repository.
+- `set_logging_level(logging_level)`: Sets the logging level.
+- `main()`: Main function to execute commands based on user input.
+
+
+
