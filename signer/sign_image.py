@@ -516,7 +516,7 @@ def main():
             return
         verify_image(gcp_login=gcp_login,image_path=image_path,attestor_name=attestor_name,attestor_project_id=attestor_project_id)
     else:
-        logging.critical(f"command {env_variables["COMMAND"]} not found")
+        logging.critical(f"command {command} not found")
 
 if __name__ == "__main__":
     logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s',stream=sys.stdout,level=logging.INFO)
