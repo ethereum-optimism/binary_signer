@@ -145,6 +145,9 @@ class DockerImage:
             self.info['name']=self.info['path'].split("/")[-1]
         else:
             self.info['name']=self.info['path']
+        if self.info['digest'] and not self.info['digest'].startswith("sha256:"):
+            self.info['digest']=f"sha256:{self.info['digest']}"
+
         
 
     def get_image_description_payload(self) -> bytes:
@@ -215,7 +218,6 @@ class GoogleArtifactoryImage(DockerImage):
     
     def retrieve_image_info(self):
         logging.info("Retriving docker image")
-
         if not self.info['digest']:
             cmd=f"gcloud container images describe {self.info['path']}:{self.info['tag']} --format=json"
             stdout, stderr = self.gcp_login.execute_shell_command(cmd=cmd,timeout=2)
@@ -227,7 +229,8 @@ class GoogleArtifactoryImage(DockerImage):
                 logging.critical("It was not possible to get Image digest")
                 raise Exception("It was not possible to get Image digest")
         else:
-            self.info['fully_qualified_digest']=f"{json_obj['path']}@{json_obj['digest']}"
+            self.info['fully_qualified_digest']=f"{self.info['path']}@{self.info['digest']}"
+
     
     def get_base64_encoded_payload_hash(self)->str:
         payload=self.get_image_description_payload()
@@ -415,8 +418,8 @@ def sign_image(gcp_login:GCPLogin,image_path:str,attestor_name:str,attestor_proj
     
     try:
         gcp_artifactory_image=GoogleArtifactoryImage(gcp_login=gcp_login,image_path=image_path)
-    except:
-        logging.critical("Image {image_path} not present remotely")
+    except Exception as e:
+        logging.critical(f"Image {image_path} not present remotely")
         return None
 
     if attestor_key_id:
@@ -452,6 +455,7 @@ def verify_image(gcp_login:GCPLogin,image_path:str,attestor_name:str,attestor_pr
 
     logging.info("Image verification ...")
     fully_qualified_digest=gcp_artifactory_image.get_fully_qualified_digest()
+    print(fully_qualified_digest)
     gcp_attestor.get_image_attestation(fully_qualified_digest)
 
 def transfer(gcp_login:GCPLogin,source_image_path:str,destination_artifact_repository:str)->str:
