@@ -217,7 +217,7 @@ class GoogleArtifactoryImage(DockerImage):
         return f"GoogleArtifactoryImage: {self.info}"
     
     def retrieve_image_info(self):
-        logging.info("Retriving docker image")
+        logging.info(f"Retriving docker image {self.info}")
         if not self.info['digest']:
             cmd=f"gcloud container images describe {self.info['path']}:{self.info['tag']} --format=json"
             stdout, stderr = self.gcp_login.execute_shell_command(cmd=cmd,timeout=2)
@@ -226,7 +226,7 @@ class GoogleArtifactoryImage(DockerImage):
                 self.info['fully_qualified_digest']=json_obj['fully_qualified_digest']
                 self.info['digest']=json_obj['digest']
             except:
-                logging.critical("It was not possible to get Image digest")
+                logging.warn("It was not possible to get Image digest")
                 raise Exception("It was not possible to get Image digest")
         else:
             self.info['fully_qualified_digest']=f"{self.info['path']}@{self.info['digest']}"
@@ -417,6 +417,7 @@ def get_command_line_args():
 def sign_image(gcp_login:GCPLogin,image_path:str,attestor_name:str,attestor_project_id:str,attestor_key_id:str=None):
     
     try:
+        pprint(image_path)
         gcp_artifactory_image=GoogleArtifactoryImage(gcp_login=gcp_login,image_path=image_path)
     except Exception as e:
         logging.critical(f"Image {image_path} not present remotely")
@@ -461,8 +462,9 @@ def verify_image(gcp_login:GCPLogin,image_path:str,attestor_name:str,attestor_pr
 def transfer(gcp_login:GCPLogin,source_image_path:str,destination_artifact_repository:str)->str:
     docker_image=DockerImage(gcp_login=gcp_login,image_path=source_image_path)
     destination_image_path=f"{destination_artifact_repository}/{docker_image.get_image_name()}:{docker_image.get_image_tag()}"
-    docker_image.pull()
-
+    image_pulled=docker_image.pull()
+    if not image_pulled:
+        return False
     try:
         #if raise exception, image does not exists remotely
         GoogleArtifactoryImage(gcp_login=gcp_login,image_path=destination_image_path)
