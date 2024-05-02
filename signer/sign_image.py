@@ -16,11 +16,11 @@ import argparse
 class GCPLogin:
     def __init__(self):
         self.access_token=None
-        self.current_user_email=self.retrieve_current_user_email()
-        self.project_id=self.current_user_email.split("@")[1].split(".")[0]
-
-        if not self.current_user_email:
-            logging.critical("No user currently logged in. Make sure you have an active user in gcloud")
+        try:
+            self.current_user_email=self.retrieve_current_user_email()
+            self.project_id=self.current_user_email.split("@")[1].split(".")[0]
+        except:
+            logging.critical("No user currently logged in. Make sure you have an active user in gcloud")    
             raise Exception("No user found logged in")
 
     def get_project_id(self):
@@ -180,18 +180,18 @@ class DockerImage:
     
     def pull(self,force_refresh=False,platform="amd64")->str:
         source_image_path=f"{self.info['path']}:{self.info['tag']}"
-        # if not force_refresh:
-        #     stdout, stderr =self.gcp_login.execute_shell_command(f"docker image inspect {source_image_path} --platform {platform}",timeout=60)
-        #     if (stdout):
-        #         logging.info(f"Image already exists locally {source_image_path}")
-        #         return True
-
+        logging.info(f"Checking if image {source_image_path} is already present locally")
+        stdout, stderr = self.gcp_login.execute_shell_command(f"docker images -q {source_image_path}", timeout=60)
+        if stdout:
+            logging.info(f"Image {source_image_path} is already present locally")
+            return True
+        
         logging.info(f"Pulling image {source_image_path}")
-        stdout, stderr =self.gcp_login.execute_shell_command(f"docker pull {source_image_path} --platform {platform}",timeout=60)
+        stdout, stderr = self.gcp_login.execute_shell_command(f"docker pull {source_image_path} --platform {platform}",timeout=60)
         if (stderr):
             logging.critical(f"FAIL: Pulling image {source_image_path} {stderr}")
             return False
-    
+        
         return True
 
     def push(self,destination_image_path,force_refresh=False)->str:
@@ -203,7 +203,7 @@ class DockerImage:
             return None
         
         logging.info(f"Push image {destination_image_path}")
-        stdout, stderr = self.gcp_login.execute_shell_command(f"docker push {destination_image_path}",timeout=60)
+        stdout, stderr = self.gcp_login.execute_shell_command(f"docker push {destination_image_path}")
         if (stderr):
             logging.critical(f"FAIL:Push image {destination_image_path} {stderr}")
             return None
@@ -220,13 +220,13 @@ class GoogleArtifactoryImage(DockerImage):
         logging.info(f"Retriving docker image {self.info}")
         if not self.info['digest']:
             cmd=f"gcloud container images describe {self.info['path']}:{self.info['tag']} --format=json"
-            stdout, stderr = self.gcp_login.execute_shell_command(cmd=cmd,timeout=2)
+            stdout, stderr = self.gcp_login.execute_shell_command(cmd=cmd,timeout=20)
             try:
                 json_obj=json.loads(stdout.strip())['image_summary']
                 self.info['fully_qualified_digest']=json_obj['fully_qualified_digest']
                 self.info['digest']=json_obj['digest']
             except:
-                logging.warn("It was not possible to get Image digest")
+                logging.warning("It was not possible to get Image digest")
                 raise Exception("It was not possible to get Image digest")
         else:
             self.info['fully_qualified_digest']=f"{self.info['path']}@{self.info['digest']}"
@@ -415,9 +415,7 @@ def get_command_line_args():
 
 
 def sign_image(gcp_login:GCPLogin,image_path:str,attestor_name:str,attestor_project_id:str,attestor_key_id:str=None):
-    
     try:
-        pprint(image_path)
         gcp_artifactory_image=GoogleArtifactoryImage(gcp_login=gcp_login,image_path=image_path)
     except Exception as e:
         logging.critical(f"Image {image_path} not present remotely")
@@ -456,7 +454,6 @@ def verify_image(gcp_login:GCPLogin,image_path:str,attestor_name:str,attestor_pr
 
     logging.info("Image verification ...")
     fully_qualified_digest=gcp_artifactory_image.get_fully_qualified_digest()
-    print(fully_qualified_digest)
     gcp_attestor.get_image_attestation(fully_qualified_digest)
 
 def transfer(gcp_login:GCPLogin,source_image_path:str,destination_artifact_repository:str)->str:
@@ -498,11 +495,18 @@ def main():
     source_image_path=env_variables.source_image_path
     command=env_variables.command
     destination_artifact_repository=env_variables.destination_artifact_repository
+    if destination_artifact_repository is not None:
+        destination_artifact_repository=destination_artifact_repository.removesuffix("/")
+
     current_user_email=None
 
     set_logging_level(logging_level)
 
-    gcp_login=GCPLogin()
+    try:
+        gcp_login=GCPLogin()
+    except Exception as e:
+        logging.critical(f"Exception occurred: {str(e)}")
+        exit(1)
 
     if command == "sign":
         sign_image(gcp_login=gcp_login,image_path=image_path,attestor_name=attestor_name,attestor_project_id=attestor_project_id,attestor_key_id=attestor_key_id)
